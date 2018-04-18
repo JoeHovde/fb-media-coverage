@@ -1,0 +1,464 @@
+---
+title: "Sentiment Analysis of NYT coverage of Facebook"
+output: html_notebook
+---
+Loading the packages for use in the analysis
+
+```{r}
+library(jsonlite)  # for accessing the NYT API
+library(lubridate)  # for easier use of dates
+library(dplyr)
+library(tidytext)
+library(ggplot2)
+library(ggthemes)
+library(readr)
+library(tidyr)
+```
+
+
+Store your API key here, get it at https://developer.nytimes.com (it takes 30 seconds)
+
+```{r}
+key <- 'your key here'
+```
+
+Going to search articles about "facebook" since its inception and look at sentiment analysis on the abstracts.
+
+Need to parse JSON, which is why we loaded jsonlite library.
+
+
+```{r}
+base <- 'http://api.nytimes.com/svc/search/v2/articlesearch.json?q=facebook&fq=source:("The%20New%20York%20Times")%20AND%20document_type:("article")&sort=oldest&api-key='
+
+
+# filtering by date so I don't have to paginate like crazy. 6 month period looks to have only around 1000 hits
+
+begin_date <- "&begin_date=20180225"
+end_date <- "&end_date=20180323"
+
+# testing out the query
+
+query <- fromJSON(paste0(base, key, begin_date, end_date, "&page="), flatten = TRUE) %>% data.frame()
+```
+Need to figure out how many pages to loop through, because NYT API only displays 10 results per page.
+
+Can figure this out with the response.meta.hits attribute, which shows the total number of results in the search.
+
+Because there are 10 results per page, we divide this number by 10. Finally, subtract 1 because the pages are indexed starting at 0
+
+```{r}
+max_pages <- round((query$response.meta.hits[1] / 10)-1)
+```
+
+Now, looping through all of the pages. Setting Sys.sleep = 1 so as not to overwhelm the API with queries.
+
+The NYT API is rather inconsistent. Experiement with different Sys.sleep values to see how quickly you can make requests without getting an error.
+
+```{r}
+pages <- list()  # make an empty list first
+
+# iterate through the number of pages, appending the page number "i" to the API query
+for(i in 0:max_pages){
+  nyt_search <- fromJSON(paste0(base, key, begin_date, end_date, "&page=", i),
+                         flatten = TRUE) %>% 
+    data.frame()
+  message("Retrieving page ", i)
+  pages[[i+1]] <- nyt_search 
+  Sys.sleep(5) 
+}
+
+
+```
+Writing csvs
+```{r}
+article_df <- article_df %>% 
+  select(response.docs.snippet,
+         response.docs.pub_date,
+         response.docs.headline.print_headline,
+         response.docs.score,
+         response.docs.new_desk,
+         response.docs.type_of_material,
+         response.docs.word_count)
+```
+
+"nyt_full_data" is the datset with all of the articles I put together. I had to babysit the code when pulling articles from the API because you can't request too many at once; break it up by date to pull small enough chunks.
+
+Formatting the dates, cutting it by month and year.
+
+
+```{r}
+# just selecting some columns for analysis
+nyt_full_data <- read_csv("~/nyt_full_data.csv")
+
+nyt_data <- nyt_full_data %>%  
+  select(response.docs.snippet, response.docs.pub_date, response.docs.score, response.docs.headline.print_headline)
+
+nyt_data <- unique(nyt_data)
+
+
+
+# formate the pub_date as a date
+nyt_data <- nyt_data %>% 
+  mutate(date = as_date(response.docs.pub_date))
+
+# cutting the data by week, month and year; this will make analysis easier
+nyt_data <- nyt_data %>% 
+  mutate(week = as.Date(cut(nyt_data$date, breaks = "week"))) %>% 
+  mutate(month = as.Date(cut(nyt_data$date, breaks = "month"))) %>% 
+  mutate(year = as.Date(cut(nyt_data$date, breaks = "year")))
+
+```
+
+Storing the theme for the charts; chose a relatively minimal theme for clarity
+
+```{r}
+fb_theme <- theme(axis.text.x = element_text(angle = 70, hjust = 1),
+        legend.position = "none",
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(color = "white"),
+        panel.grid.minor = element_blank())
+```
+
+#### Sentiment Analysis
+
+Plotting average sentiment by month. There's a clear downward pattern from the start, which is really interesting to see.
+
+```{r}
+nyt_data %>% 
+  arrange(date) %>% 
+  filter(response.docs.score > .5) %>%    # filtering by response score to get relevant articles
+  unnest_tokens(word, response.docs.snippet) %>% 
+  inner_join(get_sentiments("afinn")) %>%   # joining with sentiment dictionary
+  group_by(month) %>% 
+  summarise(n = n(), sent = mean(score)) %>%   # get the average sentiment score for each month
+  # plotting
+  ggplot(aes(x = month, y = sent)) +
+  geom_col(fill = "navyblue") +
+  scale_x_date(date_breaks = "1 year") +
+  labs(y = "average monthly sentiment",
+       title = "The Sentiment of New York Times coverage of Facebook since 2006") +
+  fb_theme +
+  scale_x_date(date_breaks = "1 year",
+               date_labels = "%Y") +
+  geom_hline(yintercept = 0, color = "lightgrey")
+```
+
+By week
+
+```{r}
+nyt_data %>% 
+  arrange(date) %>% 
+  filter(response.docs.score > .5) %>%
+  unnest_tokens(word, response.docs.snippet) %>% 
+  inner_join(get_sentiments("afinn")) %>% 
+  group_by(week) %>% 
+  summarise(n = n(), sent = mean(score)) %>% 
+  ggplot(aes(x = week, y = sent)) +
+  geom_col(fill = "navyblue") +
+  scale_x_date(date_breaks = "1 year") +
+  labs(y = "average monthly sentiment",
+       x = "date",
+       title = "The Sentiment of New York Times coverage of Facebook since 2006") +
+  theme(axis.text.x = element_text(angle = 70, hjust = 1),
+        legend.position = "none",
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(color = "white"),
+        panel.grid.minor = element_blank()) +
+  scale_x_date(date_breaks = "1 year",
+               date_labels = "%Y")
+```
+
+Sentiment by year
+
+```{r}
+# year
+nyt_data %>% 
+  arrange(date) %>% 
+  filter(response.docs.score > .3) %>% 
+  unnest_tokens(word, response.docs.snippet) %>% 
+  inner_join(get_sentiments("afinn")) %>% 
+  group_by(year) %>% 
+  summarise(n = n(), sent = mean(score)) %>% 
+  ggplot(aes(x = year, y = sent)) +
+  geom_col(fill = "navyblue") +
+  fb_theme
+```
+
+#### Frequent word and bigram analysis
+
+# Single words
+
+```{r}
+# most common words
+nyt_data %>% 
+  unnest_tokens(word, response.docs.snippet) %>%
+  anti_join(stop_words) %>% 
+  anti_join(fb_stopwords) %>% 
+  group_by(word) %>% 
+  summarise(n = n()) %>% 
+  arrange(-n) %>% 
+  top_n(30) %>% 
+  ggplot(aes(x = reorder(word,n), y = n)) +
+  geom_col(fill = "navyblue") +
+  fb_theme
+
+```
+
+# Bigrams
+
+```{r}
+
+# most common bigrams
+nyt_data %>% 
+  unnest_tokens(bigram, response.docs.snippet, token = "ngrams", n = 2) %>%
+  grep("facebook") %>% 
+  group_by(bigram) %>% 
+  summarise(n = n()) %>% 
+  arrange(-n) %>% 
+  top_n(80) %>% 
+  ggplot(aes(x = reorder(bigram,n), y = n)) +
+  geom_col() +
+  theme(axis.text.x = element_text(angle = 70, hjust = 1))
+```
+
+# Individual word counts over time
+
+"trump", for example: this is monthly count of articles in the NYT that included both references to facebook and Trump
+
+```{r}
+# looking at "trump"
+nyt_data %>% 
+  unnest_tokens(word, response.docs.snippet) %>%
+  filter(word == "trump") %>% 
+  group_by(month) %>% 
+  summarise(n = n()) %>% 
+  arrange(-n) %>% 
+  ggplot(aes(x = month, y = n)) +
+  geom_col(fill = "navyblue") +
+  fb_theme
+```
+
+# TF-IDF
+
+TF-IDF stands for term frequency-inverse document frequency. It is a measure of how relatively important a term is to a particular body of text and is often used in search engines.
+
+Looking at TF-IDF now. Saving a new dataframe with words grouped into "documents" which are years.
+
+Will use <code>bind_tf_idf</code> function from tidytext package here.
+
+```{r}
+nyt_words <- nyt_data %>% 
+  filter(response.docs.score > 1) %>%   # making them only mostly relevant to FB
+  arrange(date) %>% 
+  unnest_tokens(word, response.docs.snippet) %>% 
+  count(year, word, sort = TRUE) %>% 
+  ungroup()
+
+# calculating the tf-idf for each word, each year
+tf_idf <- nyt_words %>% 
+  bind_tf_idf(word, year, n)
+
+tf_idf %>% 
+  arrange(desc(tf_idf))
+
+# plotting the tf-idfs by year. Some sketchy stuff, but it still looks cool.
+tf_idf %>%
+  anti_join(stop_words) %>% 
+  inner_join(get_sentiments("bing")) %>% 
+  select(word, year, tf_idf) %>% 
+  mutate(word = factor(word, levels = rev(unique(word)))) %>% 
+  group_by(year) %>% 
+  arrange(-tf_idf) %>% 
+  top_n(2) %>% 
+  ungroup %>%
+  ggplot(aes(reorder(word, tf_idf), tf_idf, fill = year)) +
+  geom_col(show.legend = FALSE) +
+  labs(x = NULL, y = "tf-idf") +
+  facet_wrap(~year, ncol = 5, scales = "free") +
+  coord_flip()
+
+# plotting the term frequencies by year
+tf_idf %>%
+  anti_join(stop_words) %>% 
+  arrange(-tf) %>%
+  mutate(word = factor(word, levels = rev(unique(word)))) %>% 
+  group_by(year) %>% 
+  top_n(4) %>% 
+  ungroup %>%
+  ggplot(aes(x = word, y = tf)) +
+  geom_col(show.legend = FALSE, fill = "navyblue") +
+  labs(x = NULL, y = "tf") +
+  facet_wrap(~year, ncol = 5, scales = "free") +
+  fb_theme +
+  coord_flip()
+```
+
+Looking at most common words by year. This is a good / interesting chart
+
+```{r}
+nyt_data %>%
+  filter(response.docs.score > .5) %>% 
+  unnest_tokens(word, response.docs.snippet) %>% 
+  anti_join(fb_stopwords) %>% 
+  anti_join(stop_words) %>% 
+  filter(!is.na(year)) %>% 
+  mutate(word = factor(word, levels = rev(unique(word)))) %>% 
+  group_by(year, word) %>% 
+  summarise(n = n()) %>% 
+  arrange(-n) %>% 
+  top_n(4) %>% 
+  ungroup %>%
+  ggplot(aes(x = word, y = n)) +
+  geom_col(show.legend = FALSE, fill = "navyblue") +
+  labs(x = NULL, y = "n") +
+  facet_wrap(~year, ncol = 4, scales = "free") +
+  coord_flip() +
+  fb_theme
+```
+
+Bigrams by year
+
+```{r}
+nyt_data %>%
+  filter(response.docs.score > .5) %>% 
+  unnest_tokens(word, response.docs.snippet, token = "ngrams", n = 2) %>% 
+  separate(word, c("word1", "word2"), sep = " ") %>% 
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word) %>% 
+  filter(!word1 %in% fb_stopwords$word) %>%
+  filter(!word2 %in% fb_stopwords$word) %>% 
+  mutate(word = paste0(word1, " ", word2)) %>% 
+  mutate(word = factor(word, levels = rev(unique(word)))) %>% 
+  group_by(year, word) %>% 
+  summarise(n = n()) %>%
+  arrange(-n) %>% 
+  top_n(4) %>% 
+  ungroup %>%
+  ggplot(aes(x = word, y = n)) +
+  geom_col(fill = "navyblue", show.legend = FALSE) +
+  labs(x = NULL, y = "n") +
+  facet_wrap(~year(year), ncol = 4, scales = "free") +
+  coord_flip() +
+  scale_y_continuous(breaks = c()) +
+  fb_theme
+```
+
+Doing bigrams in base R so there're no ties in the plot
+
+```{r}
+# messing with encodings
+bigrams <- nyt_data %>%
+  filter(response.docs.score > .5) %>% 
+  unnest_tokens(word, response.docs.snippet, token = "ngrams", n = 2)
+
+Encoding(bigrams$word) <- "UTF-8"
+
+
+words_ordered_year_nyt <- bigrams %>% 
+  filter(word != "barack obama's") %>% 
+  separate(word, c("word1", "word2"), sep = " ") %>% 
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word) %>% 
+  filter(!word1 %in% fb_stopwords$word) %>%   # remove custom stopwords
+  filter(!word2 %in% fb_stopwords$word) %>%
+  mutate(word = paste0(word1, " ", word2)) %>% 
+  filter(word != "news feed") %>% 
+  group_by(year, word) %>% 
+  summarise(n = n()) %>% 
+  arrange(-n)
+
+# the above leaves us with a dataframe grouped by year, ordered by number of word occurences desc
+
+# this takes the top 4 from each group, without ties
+d_nyt <- by(words_ordered_year_nyt, words_ordered_year_nyt["year"], head, n=4)
+
+# makes it a dataframe
+d_nyt <- Reduce(rbind, d_nyt)
+
+d_nyt %>% 
+  ggplot(aes(x = reorder(word, n), y = n)) +
+  geom_col(show.legend = FALSE, fill = "navyblue") +
+  labs(x = NULL,
+       y = "frequency",
+       title = "Most Common Bigrams in the NYT's Coverage of Facebook") +
+  facet_wrap(~year(year), ncol = 3, scales = "free") +
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) +
+  scale_y_continuous(breaks = c()) +
+  coord_flip()
+```
+Giving trigrams a shot. Not really enough words to be terribly interesting.
+
+```{r}
+nyt_data %>%
+  filter(response.docs.score > .5) %>% 
+  unnest_tokens(word, response.docs.snippet, token = "ngrams", n = 3) %>% 
+  separate(word, c("word1", "word2", "word3"), sep = " ") %>% 
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word) %>% 
+  filter(!word3 %in% stop_words$word) %>% 
+  filter(!word1 %in% fb_stopwords$word) %>%
+  filter(!word2 %in% fb_stopwords$word) %>% 
+  filter(!word3 %in% fb_stopwords$word) %>% 
+  mutate(word = paste0(word1, " ", word2, " ", word3)) %>% 
+  mutate(word = factor(word, levels = rev(unique(word)))) %>% 
+  group_by(year, word) %>% 
+  summarise(n = n()) %>%
+  arrange(-n) %>% 
+  top_n(4) %>% 
+  ungroup %>%
+  ggplot(aes(x = word, y = n)) +
+  geom_col(fill = "navyblue", show.legend = FALSE) +
+  labs(x = NULL, y = "n") +
+  facet_wrap(~year(year), ncol = 4, scales = "free") +
+  coord_flip() +
+  fb_theme
+```
+
+
+Chart of words more common early vs late, using spread. This is a helpful chart. Can probably use TF-IDFs to make it better
+
+```{r}
+nyt_data %>%
+  filter(response.docs.score > .5) %>% 
+  unnest_tokens(word, response.docs.snippet) %>% 
+  inner_join(get_sentiments("bing")) %>% 
+  anti_join(fb_stopwords) %>% 
+  anti_join(stop_words) %>% 
+  filter(!is.na(year)) %>% 
+  group_by(word, year) %>% 
+  summarise(n = n()) %>% 
+# want to spread this by year now
+  spread(year, n) %>% 
+  mutate(early = sum(`2006-01-01`, `2007-01-01`, `2008-01-01`, `2009-01-01` , `2010-01-01` , `2011-01-01` , `2012-01-01` , `2013-01-01` , `2014-01-01`, na.rm = TRUE),
+         late = (`2015-01-01` + `2016-01-01` + `2017-01-01` + `2018-01-01`)) %>% 
+  mutate(ratio = late - early) %>% 
+  select(word, early, late, ratio) %>%
+  arrange(-ratio)
+```
+
+Looking at absolute value of biggest contributors to sentiment
+
+```{r}
+nyt_data %>% 
+  unnest_tokens(word, response.docs.snippet) %>% 
+  filter(word != "like") %>% 
+  inner_join(get_sentiments("afinn")) %>% 
+  add_count(word) %>% 
+  select(word, score, n) %>% 
+  arrange(-n) %>% 
+  unique() %>% 
+  filter(abs(score) > 1) %>% 
+  top_n(30) %>% 
+  ggplot(aes(x = reorder(word, score * n), y = n * score)) +
+  geom_col(aes(fill = ifelse(score > 0, "blue", "red"))) +
+  fb_theme +
+  labs(x = "Word",
+       y = "Sentiment Contribution",
+       title = "Most Important Words in NYT's Facebook Coverage Sentiment Analysis") +
+  coord_flip()
+```
+
+
